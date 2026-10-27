@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#12141A"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <!-- header -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:baselineAligned="false">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Quest Cast"
+                    android:textColor="#E6E9EF"
+                    android:textSize="26sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvConn"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="не подключено"
+                    android:textColor="#8B93A3"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvMic"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="#1B1F27"
+                android:paddingLeft="18dp"
+                android:paddingTop="10dp"
+                android:paddingRight="18dp"
+                android:paddingBottom="10dp"
+                android:text="МИК\nOFF"
+                android:textColor="#8B93A3"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvCast"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="10dp"
+                android:background="#1B1F27"
+                android:paddingLeft="18dp"
+                android:paddingTop="10dp"
+                android:paddingRight="18dp"
+                android:paddingBottom="10dp"
+                android:text="КАСТ\n—"
+                android:textColor="#E6E9EF"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- connection -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal">
+
+            <EditText
+                android:id="@+id/etHost"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="3"
+                android:hint="адрес ПК"
+                android:inputType="text"
+                android:textColor="#E6E9EF"
+                android:textColorHint="#5A6272"
+                android:textSize="16sp" />
+
+            <EditText
+                android:id="@+id/etPort"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="порт"
+                android:inputType="number"
+                android:text="47801"
+                android:textColor="#E6E9EF"
+                android:textColorHint="#5A6272"
+                android:textSize="16sp" />
+
+            <EditText
+                android:id="@+id/etToken"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="2"
+                android:hint="токен"
+                android:inputType="textCapCharacters"
+                android:textColor="#E6E9EF"
+                android:textColorHint="#5A6272"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/btnConnect"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="ПОДКЛЮЧИТЬСЯ" />
+        </LinearLayout>
+
+        <!-- big actions -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnStart"
+                android:layout_width="0dp"
+                android:layout_height="72dp"
+                android:layout_weight="1"
+                android:text="СТАРТ"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/btnStop"
+                android:layout_width="0dp"
+                android:layout_height="72dp"
+                android:layout_marginLeft="10dp"
+                android:layout_weight="1"
+                android:text="СТОП"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/btnMic"
+                android:layout_width="0dp"
+                android:layout_height="72dp"
+                android:layout_marginLeft="10dp"
+                android:layout_weight="1"
+                android:text="МИК ВКЛ"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/btnLens"
+                android:layout_width="0dp"
+                android:layout_height="72dp"
+                android:layout_marginLeft="10dp"
+                android:layout_weight="1"
+                android:text="ЛИНЗА"
+                android:textSize="16sp" />
+        </LinearLayout>
+
+        <!-- eye -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="ГЛАЗ"
+            android:textColor="#8B93A3"
+            android:textSize="12sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnLeft"
+                android:layout_width="0dp"
+                android:layout_height="68dp"
+                android:layout_weight="1"
+                android:text="ЛЕВЫЙ"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/btnRight"
+                android:layout_width="0dp"
+                android:layout_height="68dp"
+                android:layout_marginLeft="10dp"
+                android:layout_weight="1"
+                android:text="ПРАВЫЙ"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/btnBoth"
+                android:layout_width="0dp"
+                android:layout_height="68dp"
+                android:layout_marginLeft="10dp"
+                android:layout_weight="1"
+                android:text="ОБА"
+                android:textSize="16sp" />
+
+            <Button
+                android:id="@+id/btnCalib"
+                android:layout_width="0dp"
+                android:layout_height="68dp"
+                android:layout_marginLeft="10dp"
+                android:layout_weight="1"
+                android:text="КАЛИБРОВКА"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tvDetail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:fontFamily="monospace"
+            android:text=""
+            android:textColor="#8B93A3"
+            android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/tvLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:fontFamily="monospace"
+            android:text=""
+            android:textColor="#5A6272"
+            android:textSize="11sp" />
+    </LinearLayout>
+</ScrollView>

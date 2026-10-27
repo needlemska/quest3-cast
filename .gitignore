@@ -1,0 +1,32 @@
+# build outputs
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# android build outputs
+android/app/build/
+android/.gradle/
+android/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# runtime state: never in git (contains tokens, logs, pids, measured tilt)
+state/
+tmp/
+config.json
+*.log
+capture/
+*.pid
+
+# python
+__pycache__/
+*.pyc
+
+# os
+Thumbs.db
+desktop.ini
+.DS_Store

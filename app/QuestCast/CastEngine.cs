@@ -1,0 +1,555 @@
+using System.Diagnostics;
+using System.IO;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
+namespace QuestCast;
+
+/// <summary>Live view of the cast, assembled from the service state files.</summary>
+public sealed record CastState
+{
+    public bool DaemonRunning { get; init; }
+    public bool PipelineRunning { get; init; }
+    public string Device { get; init; } = "unknown";
+    public string Eye { get; init; } = "left";
+    public bool Mic { get; init; }
+    public bool Lens { get; init; }
+    public double Tilt { get; init; }
+    public int Fps { get; init; }
+    public double Mbps { get; init; }
+    public string Player { get; init; } = "mpv";
+    public int Restarts { get; init; }
+    public string DaemonUp { get; init; } = "";
+    public string PipelineUp { get; init; } = "";
+    public string LogTail { get; init; } = "";
+
+    public bool Running => DaemonRunning && PipelineRunning;
+}
+
+/// <summary>
+/// Front-end over the proven PowerShell engine (quest3-cast.ps1): the exe owns the
+/// UI, the LAN protocol and the config, the script owns the capture pipeline.
+/// </summary>
+public sealed class CastEngine
+{
+    private readonly Settings _settings;
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private string? _adbPath;
+    private DateTime _deviceAt = DateTime.MinValue;
+    private string _device = "unknown";
+
+    public string CastHome { get; }
+    public string ScriptPath => Path.Combine(CastHome, "quest3-cast.ps1");
+    public string ConfigPath => Path.Combine(CastHome, "config.json");
+    /// <summary>Where the engine keeps its pid/heartbeat/runtime files. When the GUI is
+    /// itself started in a restricted context it cannot write into %LOCALAPPDATA%,
+    /// so it hands the engine a state directory it can write (see StateOverride).</summary>
+    public static string StateOverride =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "QuestCast", "state");
+
+    public string StateDir => Environment.GetEnvironmentVariable("QUEST3CAST_STATE") is { Length: > 0 } dir
+        ? dir
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "quest3-cast");
+    public string LogPath => Path.Combine(StateDir, "cast.log");
+
+    public CastEngine(Settings settings)
+    {
+        _settings = settings;
+        CastHome = LocateCastHome(settings);
+    }
+
+    private static string LocateCastHome(Settings settings)
+    {
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(settings.CastHome)) candidates.Add(settings.CastHome);
+        var env = Environment.GetEnvironmentVariable("QUEST3CAST_HOME");
+        if (!string.IsNullOrWhiteSpace(env)) candidates.Add(env);
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "cast"));
+        // when the app sits next to a checkout of this repository: <repo>\app\QuestCast\bin\...
+        // walks up to <repo> and then into engine\
+        var probe = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 6 && probe is not null; i++, probe = probe.Parent)
+        {
+            candidates.Add(Path.Combine(probe.FullName, "engine"));
+            candidates.Add(Path.Combine(probe.FullName, "quest3-cast"));
+        }
+
+        foreach (var dir in candidates)
+        {
+            if (File.Exists(Path.Combine(dir, "quest3-cast.ps1"))) return dir;
+        }
+        return candidates[^1];
+    }
+
+    // ---------------------------------------------------------------- config
+
+    public JsonObject ReadConfig()
+    {
+        var json = File.Exists(ConfigPath) ? File.ReadAllText(ConfigPath) : "{}";
+        return JsonNode.Parse(json) as JsonObject ?? new JsonObject();
+    }
+
+    private void PatchConfig(Action<JsonObject> patch)
+    {
+        var cfg = ReadConfig();
+        patch(cfg);
+        File.WriteAllText(ConfigPath, cfg.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    public string Eye => ReadConfig()["eye"]?.GetValue<string>() ?? "left";
+    public bool Mic => (ReadConfig()["audio"]?.GetValue<string>() ?? "none") == "mic";
+    public bool Lens => ReadConfig()["lens"]?.GetValue<bool>() ?? true;
+
+    // --------------------------------------------------------------- actions
+
+    public async Task<(bool ok, string text)> StartAsync()
+    {
+        var (code, output) = await RunAsync(new[] { "start" }, 60_000);
+        return (code == 0, output.Trim());
+    }
+
+    public async Task<(bool ok, string text)> StopAsync()
+    {
+        var (code, output) = await RunAsync(new[] { "stop" }, 60_000);
+        return (code == 0, output.Trim());
+    }
+
+    public async Task<(bool ok, string text)> RestartAsync()
+    {
+        await RunAsync(new[] { "stop" }, 60_000);
+        return await StartAsync();
+    }
+
+    public async Task<(bool ok, string text)> CalibrateAsync(double? deg)
+    {
+        var args = deg is null ? new[] { "calibrate" } : new[] { "calibrate", "-Deg", deg.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) };
+        var (code, output) = await RunAsync(args, 120_000);
+        if (code != 0) return (false, output.Trim());
+
+        var text = output.Trim();
+        // calibrate measures the picture, so it is also the right moment to re-base the
+        // auto-level: the IMU pose that goes with this picture becomes the zero point
+        var roll = LastRoll;
+        var fresh = (DateTime.UtcNow - _tiltAt).TotalSeconds < 10;
+        if (_settings.AutoLevel && fresh && !double.IsNaN(roll))
+        {
+            var tilt = ReadTiltFromRuntime();
+            _settings.TiltBaseDeg = tilt;
+            _settings.TiltBaseRoll = roll;
+            _settings.Save();
+            _lastAppliedDeg = double.NaN;
+            text += $"\nбаза авто-горизонта: {tilt:0.0} deg при roll {roll:0.0} deg";
+        }
+        else if (_settings.AutoLevel)
+        {
+            text += "\nIMU молчит (нет данных за 10 с): база авто-горизонта не обновлена";
+        }
+        return (true, text);
+    }
+
+    /// <summary>Eye or mic or lens changed: the pipeline reads these at start, so restart it.</summary>
+    public async Task<(bool ok, string text)> ApplyAndRestartAsync(string key, JsonNode? value)
+    {
+        PatchConfig(cfg => cfg[key] = value);
+        return await RestartAsync();
+    }
+
+    // ------------------------------------------------- live horizon levelling
+
+    private readonly object _tiltLock = new();
+    private double _tiltRoll = double.NaN;
+    private double _tiltPitch = double.NaN;
+    private DateTime _tiltAt = DateTime.MinValue;
+    private DateTime _lastApply = DateTime.MinValue;
+    private double _lastAppliedDeg = double.NaN;
+
+    public double LastRoll { get { lock (_tiltLock) return _tiltRoll; } }
+    public double LastPitch { get { lock (_tiltLock) return _tiltPitch; } }
+
+    /// <summary>Latest roll/pitch from the headset IMU (client pushes these).</summary>
+    public void SubmitTilt(double roll, double pitch)
+    {
+        lock (_tiltLock)
+        {
+            _tiltRoll = roll;
+            _tiltPitch = pitch;
+            _tiltAt = DateTime.UtcNow;
+        }
+        if (!_settings.AutoLevel) return;
+        _ = Task.Run(ApplyTiltAsync);
+    }
+
+    public (bool ok, string text) SetAutoLevel(bool on)
+    {
+        if (on)
+        {
+            // base capture: remember what tilt the picture had, and what the IMU read then.
+            // Without a recent IMU sample the base is useless - the level would drift with
+            // a constant offset - so say it out loud instead of silently storing zero.
+            var tilt = ReadTiltFromRuntime();
+            var roll = LastRoll;
+            var fresh = (DateTime.UtcNow - _tiltAt).TotalSeconds < 10;
+            _settings.TiltBaseDeg = tilt;
+            _settings.TiltBaseRoll = fresh && !double.IsNaN(roll) ? roll : 0;
+            _settings.AutoLevel = true;
+            _settings.Save();
+            _lastAppliedDeg = double.NaN;
+            if (!fresh) return (true, $"auto-level on, base: tilt {tilt:0.0} deg, IMU пока молчит (база по roll 0 - нажмите КАЛИБРОВКА в шлеме)");
+            return (true, $"auto-level on, base: tilt {tilt:0.0} deg at imu roll {_settings.TiltBaseRoll:0.0} deg");
+        }
+        _settings.AutoLevel = false;
+        _settings.Save();
+        return (true, "auto-level off");
+    }
+
+    public (bool ok, string text) SetTiltSign(bool invert)
+    {
+        // some vendors report the gravity vector with the opposite handedness; when the
+        // horizon leans the wrong way this flips the tracking direction in one click
+        _settings.TiltSign = invert ? -1 : 1;
+        _settings.Save();
+        _lastAppliedDeg = double.NaN;
+        return (true, invert ? "auto-level sign: inverted" : "auto-level sign: normal");
+    }
+
+    private double ReadTiltFromRuntime()
+    {
+        try
+        {
+            var cfg = ReadConfig();
+            return cfg["rotateDeg"]?.GetValue<double>() ?? 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>Rewrite lens/live.glsl and ask the running mpv to reload it.</summary>
+    private async Task ApplyTiltAsync()
+    {
+        double roll;
+        DateTime at;
+        lock (_tiltLock) { roll = _tiltRoll; at = _tiltAt; }
+        if (double.IsNaN(roll)) return;
+        if ((DateTime.UtcNow - at).TotalSeconds > 2) return;          // stale sample
+        if ((DateTime.UtcNow - _lastApply).TotalMilliseconds < 250) return;  // throttle
+
+        var deg = _settings.TiltBaseDeg + _settings.TiltSign * (roll - _settings.TiltBaseRoll);
+        deg = Math.Round(deg * 2) / 2;                                  // 0.5 deg steps
+        if (!double.IsNaN(_lastAppliedDeg) && Math.Abs(deg - _lastAppliedDeg) < 0.4) return;
+
+        try
+        {
+            var shader = WriteLiveShader(deg);
+            _lastApply = DateTime.UtcNow;
+            _lastAppliedDeg = deg;
+            // the pump owns mpv's pipe (this process cannot open it), so the handover
+            // is a two-field file: shader path + timestamp the pump watches
+            var req = Path.Combine(StateDir, "tilt.json");
+            var tmp = req + ".tmp";
+            File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(new
+            {
+                shader,
+                deg,
+                ts = DateTime.UtcNow.ToString("o")
+            }));
+            File.Move(tmp, req, true);
+        }
+        catch (Exception ex)
+        {
+            ELog($"tilt: write failed ({ex.GetType().Name}: {ex.Message}) at {StateDir}");
+        }
+    }
+
+    private string WriteLiveShader(double deg)
+    {
+        var cfg = ReadConfig();
+        var k1 = cfg["lensK1"]?.GetValue<double>() ?? -0.4;
+        var k2 = cfg["lensK2"]?.GetValue<double>() ?? 0;
+        var lens = cfg["lens"]?.GetValue<bool>() ?? true;
+        if (!lens) { k1 = 0; k2 = 0; }
+
+        var tplPath = Path.Combine(CastHome, "lens-template.glsl");
+        var tpl = File.ReadAllText(tplPath);
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var ang = (deg * Math.PI / 180.0).ToString("0.000000", inv);
+        var src = tpl
+            .Replace("@K1@", k1.ToString("0.####", inv))
+            .Replace("@K2@", k2.ToString("0.####", inv))
+            .Replace("@ANGLE@", ang);
+
+        var outPath = Path.Combine(StateDir, "lens-live.glsl");
+        File.WriteAllText(outPath, src);
+        return outPath;
+    }
+
+    private async Task SendMpvCommandAsync(params string[] command)
+    {
+        using var pipe = new System.IO.Pipes.NamedPipeClientStream(".", "quest3cast-ipc", System.IO.Pipes.PipeDirection.InOut);
+        await pipe.ConnectAsync(1500);
+        var payload = System.Text.Json.JsonSerializer.Serialize(new { command });
+        var bytes = System.Text.Encoding.UTF8.GetBytes(payload + "\n");
+        await pipe.WriteAsync(bytes);
+        await pipe.FlushAsync();
+    }
+
+    private static void ELog(string s)
+    {
+        var line = $"{DateTime.Now:HH:mm:ss} {s}{Environment.NewLine}";
+        foreach (var dir in new[]
+        {
+            AppContext.BaseDirectory,
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "QuestCast"),
+        })
+        {
+            try
+            {
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, "engine.log"), line);
+            }
+            catch { }
+        }
+    }
+
+    private async Task<(int code, string output)> RunAsync(string[] args, int timeoutMs)
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8,
+            };
+            psi.ArgumentList.Add("-NoProfile");
+            psi.ArgumentList.Add("-ExecutionPolicy");
+            psi.ArgumentList.Add("Bypass");
+            psi.ArgumentList.Add("-File");
+            psi.ArgumentList.Add(ScriptPath);
+            foreach (var a in args) psi.ArgumentList.Add(a);
+
+            using var p = Process.Start(psi)!;
+            ELog($"run {string.Join(' ', args)} script={ScriptPath} localappdata={Environment.GetEnvironmentVariable("LOCALAPPDATA")}");
+            var stdout = p.StandardOutput.ReadToEndAsync();
+            var stderr = p.StandardError.ReadToEndAsync();
+            var exit = p.WaitForExitAsync();
+            if (await Task.WhenAny(exit, Task.Delay(timeoutMs)) != exit)
+            {
+                try { p.Kill(true); } catch { }
+                ELog("timeout");
+                return (1, $"timeout after {timeoutMs / 1000}s");
+            }
+            await exit;
+            var text = (await stdout) + (await stderr);
+            ELog($"exit={p.ExitCode} out={text.Replace("\r", "").Replace("\n", " | ")}");
+            return (p.ExitCode, text);
+        }
+        catch (Exception ex)
+        {
+            return (1, ex.Message);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    // ----------------------------------------------------------------- state
+
+    public async Task<CastState> ReadStateAsync()
+    {
+        var cfg = ReadConfig();
+        var eye = cfg["eye"]?.GetValue<string>() ?? "left";
+        var mic = (cfg["audio"]?.GetValue<string>() ?? "none") == "mic";
+        var lens = cfg["lens"]?.GetValue<bool>() ?? true;
+        var tilt = cfg["rotateDeg"]?.GetValue<double>() ?? 0;
+        var ip = cfg["ip"]?.GetValue<string>() ?? "";
+        var port = cfg["port"]?.GetValue<int>() ?? 5555;
+
+        var daemonPid = ReadPid("daemon.pid");
+        var pipelinePid = ReadPid("scrcpy.pid");
+
+        var player = "mpv";
+        var restarts = 0;
+        string daemonUp = "", pipelineUp = "";
+        string? runtimeAudio = null;
+        try
+        {
+            var rtPath = Path.Combine(StateDir, "runtime.json");
+            if (File.Exists(rtPath))
+            {
+                var rt = JsonNode.Parse(File.ReadAllText(rtPath))!;
+                player = rt["player"]?.GetValue<string>() ?? player;
+                restarts = rt["restarts"]?.GetValue<int>() ?? 0;
+                runtimeAudio = rt["audio"]?.GetValue<string>();
+                if (rt["daemonSince"] is JsonNode ds && DateTime.TryParse(ds.GetValue<string>(), out var d))
+                    daemonUp = FormatSpan(DateTime.Now - d.ToLocalTime());
+                if (rt["pipelineSince"] is JsonNode ps && DateTime.TryParse(ps.GetValue<string>(), out var pdt))
+                    pipelineUp = FormatSpan(DateTime.Now - pdt.ToLocalTime());
+            }
+        }
+        catch { }
+
+        // the microphone indicator must show what is REALLY being captured, so the
+        // daemon's runtime state wins over config.json until the next restart
+        if (runtimeAudio is not null) mic = runtimeAudio == "mic";
+
+        var fps = 0;
+        var mbps = 0.0;
+        try
+        {
+            var statsPath = Path.Combine(StateDir, "stats.json");
+            if (File.Exists(statsPath))
+            {
+                var st = JsonNode.Parse(File.ReadAllText(statsPath))!;
+                var ts = st["ts"]?.GetValue<string>();
+                if (ts is not null && DateTime.TryParse(ts, out var when) && (DateTime.Now - when.ToLocalTime()).TotalSeconds < 4)
+                {
+                    fps = (int)Math.Round(st["fps"]?.GetValue<double>() ?? 0);
+                    mbps = Math.Round(st["mbps"]?.GetValue<double>() ?? 0, 1);
+                }
+            }
+        }
+        catch { }
+
+        var device = await GetDeviceAsync(ip, port);
+
+        return new CastState
+        {
+            DaemonRunning = IsAlive(daemonPid),
+            PipelineRunning = IsAlive(pipelinePid),
+            Device = device,
+            Eye = eye,
+            Mic = mic,
+            Lens = lens,
+            Tilt = tilt,
+            Fps = fps,
+            Mbps = mbps,
+            Player = player,
+            Restarts = restarts,
+            DaemonUp = daemonUp,
+            PipelineUp = pipelineUp,
+            LogTail = ReadLogTail(12),
+        };
+    }
+
+    private string ReadLogTail(int lines)
+    {
+        try
+        {
+            if (!File.Exists(LogPath)) return "";
+            using var fs = new FileStream(LogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var sr = new StreamReader(fs);
+            var all = sr.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            return string.Join('\n', all.TakeLast(lines));
+        }
+        catch { return ""; }
+    }
+
+    private static string FormatSpan(TimeSpan span) =>
+        span.TotalHours >= 1 ? $"{(int)span.TotalHours:00}:{span.Minutes:00}:{span.Seconds:00}"
+                              : $"{span.Minutes:00}:{span.Seconds:00}";
+
+    private int ReadPid(string name)
+    {
+        try
+        {
+            // must follow StateDir: when the engine is pointed at an alternative state
+            // directory the pid files are there, and reading the default one made the
+            // GUI report "остановлен" while the pipeline was happily running
+            var p = Path.Combine(StateDir, name);
+            if (!File.Exists(p)) return 0;
+            return int.TryParse(File.ReadAllText(p).Trim(), out var id) ? id : 0;
+        }
+        catch { return 0; }
+    }
+
+    private static bool IsAlive(int pid)
+    {
+        if (pid <= 0) return false;
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            return !p.HasExited;
+        }
+        catch { return false; }
+    }
+
+    // ---------------------------------------------------------------- device
+
+    private async Task<string> GetDeviceAsync(string ip, int port)
+    {
+        if ((DateTime.Now - _deviceAt).TotalSeconds < 5) return _device;
+        _deviceAt = DateTime.Now;
+        if (string.IsNullOrEmpty(ip)) return _device;
+
+        var adb = FindAdb();
+        if (adb is null) return _device = "adb not found";
+        try
+        {
+            var psi = new ProcessStartInfo(adb)
+            {
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true
+            };
+            psi.ArgumentList.Add("-s");
+            psi.ArgumentList.Add($"{ip}:{port}");
+            psi.ArgumentList.Add("get-state");
+            using var p = Process.Start(psi)!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            var errTask = p.StandardError.ReadToEndAsync();
+            var done = await Task.WhenAny(p.WaitForExitAsync(), Task.Delay(3000));
+            if (!p.HasExited)
+            {
+                try { p.Kill(true); } catch { }
+                return _device = "no answer";
+            }
+            var text = ((await outTask) + (await errTask)).Trim().Split('\n')[0].Trim();
+            return _device = string.IsNullOrEmpty(text) ? "offline" : text;
+        }
+        catch (Exception ex)
+        {
+            return _device = ex.GetType().Name;
+        }
+    }
+
+    private string? FindAdb()
+    {
+        if (_adbPath is not null) return _adbPath.Length == 0 ? null : _adbPath;
+
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                var candidate = Path.Combine(dir, "adb.exe");
+                if (File.Exists(candidate)) return _adbPath = candidate;
+            }
+            catch { }
+        }
+
+        // winget keeps adb out of PATH until the shell is restarted
+        try
+        {
+            var winget = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Microsoft", "WinGet", "Packages");
+            if (Directory.Exists(winget))
+            {
+                foreach (var hit in Directory.EnumerateFiles(winget, "adb.exe", SearchOption.AllDirectories))
+                {
+                    return _adbPath = hit;
+                }
+            }
+        }
+        catch { }
+
+        _adbPath = "";
+        return null;
+    }
+
+    public string ConfigIp =>
+        (ReadConfig()["ip"]?.GetValue<string>() ?? "") + ":" + (ReadConfig()["port"]?.GetValue<int>() ?? 5555);
+}
