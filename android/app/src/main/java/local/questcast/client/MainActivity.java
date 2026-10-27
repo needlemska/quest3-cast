@@ -35,8 +35,13 @@ public class MainActivity extends Activity {
     private static final int PORT_DEFAULT = 47801;
 
     private EditText etHost, etPort, etToken;
-    private Button btnConnect, btnStart, btnStop, btnMic, btnLens, btnLeft, btnRight, btnBoth, btnCalib;
+    private Button btnConnect, btnStart, btnStop, btnMic, btnLens, btnLeft, btnRight, btnBoth, btnCalib, btnGuide, btnGuideDone;
     private TextView tvConn, tvMic, tvCast, tvDetail, tvLog;
+    private View scrollUi, calibOverlay;
+    private HorizonView horizonView;
+    private volatile boolean guideOn;
+    private volatile double streamDeg = Double.NaN;
+    private volatile double imuDeg = Double.NaN;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -72,6 +77,11 @@ public class MainActivity extends Activity {
         btnRight = findViewById(R.id.btnRight);
         btnBoth = findViewById(R.id.btnBoth);
         btnCalib = findViewById(R.id.btnCalib);
+        btnGuide = findViewById(R.id.btnGuide);
+        btnGuideDone = findViewById(R.id.btnGuideDone);
+        scrollUi = findViewById(R.id.scrollUi);
+        calibOverlay = findViewById(R.id.calibOverlay);
+        horizonView = findViewById(R.id.horizonView);
         tvConn = findViewById(R.id.tvConn);
         tvMic = findViewById(R.id.tvMic);
         tvCast = findViewById(R.id.tvCast);
@@ -98,6 +108,8 @@ public class MainActivity extends Activity {
         btnRight.setOnClickListener(v -> send("eye", "right"));
         btnBoth.setOnClickListener(v -> send("eye", "both"));
         btnCalib.setOnClickListener(v -> send("calibrate", null));
+        btnGuide.setOnClickListener(v -> showGuide(!guideOn));
+        btnGuideDone.setOnClickListener(v -> showGuide(false));
 
         renderMic(false);
         renderCast(false);
@@ -380,6 +392,8 @@ public class MainActivity extends Activity {
         int fps = st.optInt("fps");
         double mbps = st.optDouble("mbps", 0);
         String eye = st.optString("eye", "left");
+        streamDeg = st.has("tilt") ? st.optDouble("tilt") : Double.NaN;
+        imuDeg = st.has("imu") && !st.isNull("imu") ? st.optDouble("imu") : Double.NaN;
 
         ui.post(() -> {
             renderMic(micOn);
@@ -399,7 +413,26 @@ public class MainActivity extends Activity {
                             + "\nканал: " + mbps + " Mb/s · глаз: " + eyeText
                             + "\nнаклон: " + st.optDouble("tilt") + "° · плеер: " + st.optString("player")
                             + "\nпрошло: " + st.optString("daemonUp") + " / перезапусков " + st.optInt("restarts"));
+
+            if (guideOn) {
+                horizonView.setAngles(streamDeg, imuDeg);
+            }
         });
+    }
+
+    /**
+     * Headset half of the two-line guide: the UI is replaced by a full-screen line that is
+     * fixed to the panel, and the PC is asked to draw its own line over the stream.
+     */
+    private void showGuide(boolean on) {
+        guideOn = on;
+        scrollUi.setVisibility(on ? View.GONE : View.VISIBLE);
+        calibOverlay.setVisibility(on ? View.VISIBLE : View.GONE);
+        btnGuide.setText(on ? "ЛИНИЯ ВКЛ" : "ЛИНИЯ");
+        if (on) {
+            horizonView.setAngles(streamDeg, imuDeg);
+        }
+        send("guide", on);
     }
 
     private void renderMic(boolean on) {

@@ -115,9 +115,11 @@ public partial class MainWindow : Window
         else if (st.Eye == "left") RbLeft.IsChecked = true;
 
         TxtSub.Text = $"daemon {(st.DaemonRunning ? st.DaemonUp : "—")} · конвейер {(st.PipelineRunning ? st.PipelineUp : "—")} · {st.Player} · перезапусков {st.Restarts} · наклон {st.Tilt:0.0}°"
-            + (_cfg.AutoLevel ? $" · авто {(double.IsNaN(_engine.LastRoll) ? "—" : _engine.LastRoll.ToString("0.0"))}°" : "");
+            + (st.AutoLevel ? $" · IMU {(double.IsNaN(st.ImuRoll) ? "—" : st.ImuRoll.ToString("0.0"))}°" : "")
+            + (st.Guide ? $" · линия вкл" : "");
         BtnAuto.Content = _cfg.AutoLevel ? "АВТО ВКЛ" : "АВТО-ГОРИЗОНТ";
         BtnSign.Content = _cfg.TiltSign >= 0 ? "ЗНАК КРЕНА: ОБЫЧНЫЙ" : "ЗНАК КРЕНА: ПЕРЕВЁРНУТ";
+        BtnGuide.Content = st.Guide ? "ЛИНИЯ ВКЛ" : "ЛИНИЯ";
 
         if (!_busy)
         {
@@ -199,6 +201,26 @@ public partial class MainWindow : Window
         _cfg.TiltSign = invert ? -1 : 1;
         AppLog((ok ? "ok   " : "fail ") + text);
         BtnSign.Content = invert ? "ЗНАК КРЕНА: ПЕРЕВЁРНУТ" : "ЗНАК КРЕНА: ОБЫЧНЫЙ";
+    }
+
+    /// <summary>Alignment line: the headset draws the reference, the stream draws its twin.</summary>
+    private void Guide_Click(object sender, RoutedEventArgs e)
+    {
+        var on = !_cfg.Guide;
+        var (ok, text) = _engine.SetGuide(on);
+        _cfg.Guide = on;
+        AppLog((ok ? "ok   " : "fail ") + text);
+        BtnGuide.Content = on ? "ЛИНИЯ ВКЛ" : "ЛИНИЯ";
+    }
+
+    private void Minus_Click(object sender, RoutedEventArgs e) => Nudge(-0.5);
+
+    private void Plus_Click(object sender, RoutedEventArgs e) => Nudge(0.5);
+
+    private void Nudge(double delta)
+    {
+        var (ok, text) = _engine.NudgeTilt(delta);
+        AppLog((ok ? "ok   " : "fail ") + "наклон " + text);
     }
 
     private async void Eye_Click(object sender, RoutedEventArgs e)

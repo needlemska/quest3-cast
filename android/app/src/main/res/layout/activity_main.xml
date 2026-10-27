@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#12141A">
+
+<ScrollView
+    android:id="@+id/scrollUi"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#12141A"
@@ -211,6 +217,15 @@
                 android:layout_weight="1"
                 android:text="КАЛИБРОВКА"
                 android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/btnGuide"
+                android:layout_width="0dp"
+                android:layout_height="68dp"
+                android:layout_marginLeft="10dp"
+                android:layout_weight="1"
+                android:text="ЛИНИЯ"
+                android:textSize="14sp" />
         </LinearLayout>
 
         <TextView
@@ -234,3 +249,29 @@
             android:textSize="11sp" />
     </LinearLayout>
 </ScrollView>
+
+    <!-- calibration screen: the headset half of the two-line horizon guide -->
+    <LinearLayout
+        android:id="@+id/calibOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#0E1218"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:visibility="gone">
+
+        <local.questcast.client.HorizonView
+            android:id="@+id/horizonView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <Button
+            android:id="@+id/btnGuideDone"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:text="ГОТОВО"
+            android:textSize="16sp" />
+    </LinearLayout>
+
+</FrameLayout>

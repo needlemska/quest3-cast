@@ -20,7 +20,8 @@ param(
     [double]$Opacity = 0.62,
     [string]$Mode = '',
     [int]$MaxIdle = 45,
-    [switch]$Mic
+    [switch]$Mic,
+    [string]$GuidePath = ''
 )
 
 # The microphone is off unless the cast was explicitly started with it, so the
@@ -69,6 +70,24 @@ $label.Location = New-Object System.Drawing.Point(10, 6)
 $label.Text = 'fps --  vid --' + [Environment]::NewLine + 'cpu --  ram --' + [Environment]::NewLine +
               'gpu --  ping --' + [Environment]::NewLine + $micText + [Environment]::NewLine + '--'
 $form.Controls.Add($label)
+
+# ------------------------------------------------------- horizon guide line
+# A dead straight line across the whole screen, drawn by the PC next to the
+# streamed picture. The client draws its twin in the headset, so the operator
+# brings the two together instead of guessing an angle. Kept in a separate
+# always-on-top window so it does not depend on the player's shaders at all.
+$guideForm = $null
+if ($GuidePath) {
+    $guideForm = New-Object System.Windows.Forms.Form
+    $guideForm.FormBorderStyle = 'None'
+    $guideForm.ShowInTaskbar = $false
+    $guideForm.TopMost = $true
+    $guideForm.StartPosition = 'Manual'
+    $guideForm.BackColor = [System.Drawing.Color]::FromArgb(40, 240, 255)
+    $guideForm.Opacity = 0.9
+    $guideForm.Text = 'Quest3 Guide'
+    $guideForm.Visible = $false
+}
 
 # ------------------------------------------------------------ metrics setup
 
@@ -203,9 +222,48 @@ $render = {
     # the raw (lens:false) pipeline passes: there is no stats producer there, and
     # a self-closing HUD would just be respawned by the daemon again and again.
     if ($MaxIdle -gt 0 -and -not $script:seenStats -and ($now - $startedAt).TotalSeconds -gt $MaxIdle) { $form.Close() }
+
+    # ---- horizon guide line is driven by its own timer, see $guideTick
 }
 
 $timer.Add_Tick($render)
+
+# The guide line has its own timer: Show()/Hide() on state change is reliable,
+# while flipping Form.Visible from a deep timer handler is not.
+$script:guideShown = $false
+$guideTick = {
+    if (-not $guideForm) { return }
+    try {
+    $want = $false
+    if (Test-Path $GuidePath) {
+        try {
+            $g = Get-Content $GuidePath -Raw -ErrorAction Stop | ConvertFrom-Json
+            if ($g.on -eq $true) { $want = $true }
+        } catch { $want = $false }
+    }
+    if ($want -eq $script:guideShown) { return }
+
+    if ($want) {
+        $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        $guideForm.Width = [int]$screen.Width
+        $guideForm.Height = 3
+        $midY = [int]([int]$screen.Top + ([int]$screen.Height / 2) - 1)
+        $guideForm.Location = New-Object System.Drawing.Point -ArgumentList @([int]$screen.Left, $midY)
+        $guideForm.Show()
+        $guideForm.TopMost = $true
+        $guideForm.BringToFront()
+    } else {
+        $guideForm.Hide()
+    }
+    $script:guideShown = $want
+    } catch {
+        $errFile = Join-Path ([System.IO.Path]::GetTempPath()) 'quest3-guide-error.log'
+        try { [System.IO.File]::AppendAllText($errFile, ((Get-Date).ToString('o') + ' ' + $_.Exception.Message + ' @ ' + $_.InvocationInfo.ScriptLineNumber + "`r`n")) } catch { }
+    }
+}
+$guideTimer = New-Object System.Windows.Forms.Timer
+$guideTimer.Interval = 250
+$guideTimer.Add_Tick($guideTick)
 
 $form.add_Shown({
     $handle = $form.Handle
@@ -214,6 +272,18 @@ $form.add_Shown({
     # makes the window render fully transparent, so only the flags below are ours.
     $null = [HudNative]::SetWindowLong($handle, $GWL_EXSTYLE,
         $ex -bor $WS_EX_TRANSPARENT -bor $WS_EX_TOOLWINDOW -bor $WS_EX_NOACTIVATE)
+
+    if ($guideForm) {
+        # click-through as well, otherwise the line would eat mouse clicks over
+        # the player window. Keep it created but hidden until the guide is asked for.
+        $guideForm.Show()
+        $guideForm.Hide()
+        $gh = $guideForm.Handle
+        $gex = [HudNative]::GetWindowLong($gh, $GWL_EXSTYLE)
+        $null = [HudNative]::SetWindowLong($gh, $GWL_EXSTYLE,
+            $gex -bor $WS_EX_TRANSPARENT -bor $WS_EX_TOOLWINDOW -bor $WS_EX_NOACTIVATE)
+        $guideTimer.Start()
+    }
 
     $render.Invoke()
     $timer.Start()

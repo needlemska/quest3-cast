@@ -70,6 +70,8 @@ $defaults = [ordered]@{
     lensK2       = 0
     player       = 'mpv'         # mpv (GPU decode + GPU shader) | ffplay (CPU only)
     rotateDeg    = 0             # extra fine tilt, degrees; 0 = as captured
+    guide        = $false        # draw the alignment line over the picture
+    guideAngle   = 0             # angle of that line in output space, degrees
     audio        = 'none'        # none | mic  - the microphone is OFF by default
     audioBitrate = 128
     fullscreen   = $true
@@ -376,6 +378,15 @@ function Write-LensShader($cfg) {
     $text = $text.Replace('@K1@', ([double]$cfg.lensK1).ToString($inv))
     $text = $text.Replace('@K2@', ([double]$cfg.lensK2).ToString($inv))
     $text = $text.Replace('@ANGLE@', $ang.ToString($inv))
+    # alignment guide line: drawn in output space so it stays horizontal; the
+    # client draws the twin line in the headset, aligning the two sets the tilt
+    $guide = if ($cfg.PSObject.Properties['guide'] -and $cfg.guide) { 1 } else { 0 }
+    $guideAng = 0.0
+    if ($cfg.PSObject.Properties['guideAngle'] -and $cfg.guideAngle) {
+        $guideAng = [math]::Round([double]$cfg.guideAngle * [math]::PI / 180.0, 6)
+    }
+    $text = $text.Replace('@GUIDE@', [string]$guide)
+    $text = $text.Replace('@GUIDEANG@', $guideAng.ToString($inv))
     $out = Join-Path $stateDir 'lens.glsl'
     Set-Content -Path $out -Value $text -Encoding ASCII
     return $out
@@ -502,7 +513,8 @@ function Start-Overlay($cfg) {
         '-Corner', [string]$cfg.overlayCorner,
         '-Opacity', [string]$cfg.overlayOpacity,
         '-MaxIdle', $(if ($cfg.lens) { '45' } else { '0' }),
-        '-Mode', ('{0}p{1}/{2}/{3}' -f $cfg.maxSize, $cfg.fps, $cfg.audio, $cfg.player)
+        '-Mode', ('{0}p{1}/{2}/{3}' -f $cfg.maxSize, $cfg.fps, $cfg.audio, $cfg.player),
+        '-GuidePath', (Join-Path $stateDir 'guide.json')
     )
     if ($cfg.audio -and $cfg.audio -ne 'none') { $oargs += '-Mic' }
     $o = Start-Process -FilePath $psExe -PassThru -WindowStyle Hidden -ArgumentList $oargs

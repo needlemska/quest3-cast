@@ -22,6 +22,9 @@ public sealed record CastState
     public string DaemonUp { get; init; } = "";
     public string PipelineUp { get; init; } = "";
     public string LogTail { get; init; } = "";
+    public bool Guide { get; init; }
+    public double ImuRoll { get; init; } = double.NaN;
+    public bool AutoLevel { get; init; }
 
     public bool Running => DaemonRunning && PipelineRunning;
 }
@@ -64,15 +67,9 @@ public sealed class CastEngine
         if (!string.IsNullOrWhiteSpace(settings.CastHome)) candidates.Add(settings.CastHome);
         var env = Environment.GetEnvironmentVariable("QUEST3CAST_HOME");
         if (!string.IsNullOrWhiteSpace(env)) candidates.Add(env);
+        // typical layout: repo\app\QuestCast\bin\<cfg>\app\cast or a "cast" folder next to the exe
         candidates.Add(Path.Combine(AppContext.BaseDirectory, "cast"));
-        // when the app sits next to a checkout of this repository: <repo>\app\QuestCast\bin\...
-        // walks up to <repo> and then into engine\
-        var probe = new DirectoryInfo(AppContext.BaseDirectory);
-        for (var i = 0; i < 6 && probe is not null; i++, probe = probe.Parent)
-        {
-            candidates.Add(Path.Combine(probe.FullName, "engine"));
-            candidates.Add(Path.Combine(probe.FullName, "quest3-cast"));
-        }
+        candidates.Add(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "engine")));
 
         foreach (var dir in candidates)
         {
@@ -152,6 +149,97 @@ public sealed class CastEngine
     {
         PatchConfig(cfg => cfg[key] = value);
         return await RestartAsync();
+    }
+
+    /// <summary>
+    /// Alignment guide: a line over the picture at the current rotation. The client
+    /// draws its twin in the headset, so the operator can bring the two together and
+    /// read the error straight off the screen instead of guessing.
+    /// </summary>
+    public (bool ok, string text) SetGuide(bool on)
+    {
+        _settings.Guide = on;
+        _settings.Save();
+        PatchConfig(cfg => cfg["guide"] = on);
+
+        // The line itself is drawn by the HUD overlay window, not by the shader: the
+        // player may ignore a shader swap mid-stream, while a topmost window always
+        // shows. The shader keeps its own guide disabled so the two never disagree.
+        try
+        {
+            var req = Path.Combine(StateDir, "guide.json");
+            var tmp = req + ".tmp";
+            File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(new
+            {
+                on,
+                deg = CurrentDeg(),
+                ts = DateTime.UtcNow.ToString("o")
+            }));
+            File.Move(tmp, req, true);
+        }
+        catch (Exception ex)
+        {
+            ELog($"guide: write failed ({ex.GetType().Name}: {ex.Message})");
+        }
+
+        _ = Task.Run(() => ApplyDegAsync(CurrentDeg()));
+        return (true, on ? "линия на стриме включена" : "линия на стриме выключена");
+    }
+
+    /// <summary>Nudge the streamed rotation by a step while the guide line is up.</summary>
+    public (bool ok, string text) NudgeTilt(double delta)
+    {
+        var deg = CurrentDeg() + delta;
+        if (deg > 180) deg -= 360;
+        if (deg < -180) deg += 360;
+        deg = Math.Round(deg * 2) / 2;
+        PatchConfig(cfg => cfg["rotateDeg"] = deg);
+        if (_settings.AutoLevel)
+        {
+            // keep tracking relative to the new picture tilt, otherwise the next IMU
+            // sample would pull the frame back to the old base
+            _settings.TiltBaseDeg = deg;
+            _settings.TiltBaseRoll = LastRoll;
+            _settings.Save();
+        }
+        _lastAppliedDeg = double.NaN;
+        _ = Task.Run(() => ApplyDegAsync(deg));
+        return (true, $"{deg:0.0} deg");
+    }
+
+    private double CurrentDeg()
+    {
+        try
+        {
+            var cfg = ReadConfig();
+            return cfg["rotateDeg"]?.GetValue<double>() ?? 0;
+        }
+        catch { return 0; }
+    }
+
+    /// <summary>Regenerate the shader for an explicit angle (used by the guide and nudges).</summary>
+    private Task ApplyDegAsync(double deg)
+    {
+        try
+        {
+            var shader = WriteLiveShader(Math.Round(deg * 2) / 2);
+            var req = Path.Combine(StateDir, "tilt.json");
+            var tmp = req + ".tmp";
+            File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(new
+            {
+                shader,
+                deg,
+                ts = DateTime.UtcNow.ToString("o")
+            }));
+            File.Move(tmp, req, true);
+            _lastAppliedDeg = deg;
+            _lastApply = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            ELog($"guide: write failed ({ex.GetType().Name}: {ex.Message})");
+        }
+        return Task.CompletedTask;
     }
 
     // ------------------------------------------------- live horizon levelling
@@ -274,7 +362,9 @@ public sealed class CastEngine
         var src = tpl
             .Replace("@K1@", k1.ToString("0.####", inv))
             .Replace("@K2@", k2.ToString("0.####", inv))
-            .Replace("@ANGLE@", ang);
+            .Replace("@ANGLE@", ang)
+            .Replace("@GUIDE@", "0")
+            .Replace("@GUIDEANG@", "0.0");
 
         var outPath = Path.Combine(StateDir, "lens-live.glsl");
         File.WriteAllText(outPath, src);
@@ -433,6 +523,9 @@ public sealed class CastEngine
             DaemonUp = daemonUp,
             PipelineUp = pipelineUp,
             LogTail = ReadLogTail(12),
+            Guide = _settings.Guide,
+            ImuRoll = LastRoll,
+            AutoLevel = _settings.AutoLevel,
         };
     }
 

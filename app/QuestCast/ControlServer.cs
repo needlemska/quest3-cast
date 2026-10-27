@@ -253,6 +253,18 @@ public sealed class ControlServer : IAsyncDisposable
                 result = _engine.SetTiltSign(AsBool(value, true));
                 break;
             }
+            case "guide":
+            {
+                result = _engine.SetGuide(AsBool(value, true));
+                break;
+            }
+            case "nudge":
+            {
+                // step the rotation while the alignment line is up: +0.5 / -0.5 deg
+                var delta = value is null ? 0.5 : value.GetValue<double>();
+                result = _engine.NudgeTilt(delta);
+                break;
+            }
             case "state":
                 result = (true, "ok");
                 break;
@@ -321,7 +333,10 @@ public sealed class ControlServer : IAsyncDisposable
         ["player"] = s.Player,
         ["restarts"] = s.Restarts,
         ["daemonUp"] = s.DaemonUp,
-        ["pipelineUp"] = s.PipelineUp
+        ["pipelineUp"] = s.PipelineUp,
+        ["guide"] = s.Guide,
+        ["imu"] = double.IsNaN(s.ImuRoll) ? null : Math.Round(s.ImuRoll, 1),
+        ["autoLevel"] = s.AutoLevel
     };
 
     private static JsonObject Err(string message) => new() { ["type"] = "error", ["message"] = message };

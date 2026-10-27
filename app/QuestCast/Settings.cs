@@ -26,6 +26,9 @@ public sealed class Settings
     /// <summary>+1 / -1: the IMU axis may point the other way, so the user can flip it.</summary>
     public int TiltSign { get; set; } = 1;
 
+    /// <summary>Alignment line over the streamed picture (the headset draws its twin).</summary>
+    public bool Guide { get; set; }
+
     private static string Dir =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "QuestCast");
 
