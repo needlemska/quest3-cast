@@ -25,6 +25,7 @@ public sealed record CastState
     public bool Guide { get; init; }
     public double ImuRoll { get; init; } = double.NaN;
     public bool AutoLevel { get; init; }
+    public double TrimResidual { get; init; } = double.NaN;
 
     public bool Running => DaemonRunning && PipelineRunning;
 }
@@ -266,9 +267,36 @@ public sealed class CastEngine
             _tiltRoll = roll;
             _tiltPitch = pitch;
             _tiltAt = DateTime.UtcNow;
+            _rollTrack.Enqueue((_tiltAt, roll));
+            while (_rollTrack.Count > 0 && (_tiltAt - _rollTrack.Peek().at).TotalSeconds > 3)
+                _rollTrack.Dequeue();
         }
         if (!_settings.AutoLevel) return;
         _ = Task.Run(ApplyTiltAsync);
+    }
+
+    private readonly Queue<(DateTime at, double roll)> _rollTrack = new();
+
+    /// <summary>
+    /// Spread of the roll over the last couple of seconds, or NaN when the sample
+    /// stream is too short to judge. A moving head must not be "corrected": the
+    /// measurement would lag behind the pose and the trim would chase its tail.
+    /// </summary>
+    private double RollSpread()
+    {
+        lock (_tiltLock)
+        {
+            if (_rollTrack.Count < 4) return double.NaN;
+            var lo = double.MaxValue;
+            var hi = double.MinValue;
+            foreach (var (at, roll) in _rollTrack)
+            {
+                if (!double.IsFinite(roll)) return double.NaN;
+                lo = Math.Min(lo, roll);
+                hi = Math.Max(hi, roll);
+            }
+            return hi - lo;
+        }
     }
 
     public (bool ok, string text) SetAutoLevel(bool on)
@@ -304,6 +332,22 @@ public sealed class CastEngine
         return (true, invert ? "auto-level sign: inverted" : "auto-level sign: normal");
     }
 
+    /// <summary>
+    /// How much picture rotation one degree of head roll produces. The leftover lean the
+    /// operator sees after a head turn is exactly a wrong gain: with 1.0 the picture
+    /// lags the head, with 1.2 it overshoots.
+    /// </summary>
+    public (bool ok, string text) SetGain(double gain)
+    {
+        if (!double.IsFinite(gain)) return (false, "gain: не число");
+        _settings.TiltGain = Math.Round(Math.Clamp(gain, 0.4, 1.8), 2);
+        _settings.Save();
+        _lastAppliedDeg = double.NaN;
+        return (true, $"gain {_settings.TiltGain:0.00}");
+    }
+
+    public double TiltGain => _settings.TiltGain;
+
     private double ReadTiltFromRuntime()
     {
         try
@@ -324,7 +368,7 @@ public sealed class CastEngine
         if ((DateTime.UtcNow - at).TotalSeconds > 2) return;          // stale sample
         if ((DateTime.UtcNow - _lastApply).TotalMilliseconds < 250) return;  // throttle
 
-        var deg = _settings.TiltBaseDeg + _settings.TiltSign * (roll - _settings.TiltBaseRoll);
+        var deg = _settings.TiltBaseDeg + _settings.TiltSign * _settings.TiltGain * (roll - _settings.TiltBaseRoll);
         deg = Math.Round(deg * 2) / 2;                                  // 0.5 deg steps
         if (!double.IsNaN(_lastAppliedDeg) && Math.Abs(deg - _lastAppliedDeg) < 0.4) return;
 
@@ -344,11 +388,149 @@ public sealed class CastEngine
                 ts = DateTime.UtcNow.ToString("o")
             }));
             File.Move(tmp, req, true);
+            LogTiltSample(roll, deg);
         }
         catch (Exception ex)
         {
             ELog($"tilt: write failed ({ex.GetType().Name}: {ex.Message}) at {StateDir}");
         }
+    }
+
+    private int _tiltLogLines;
+
+    /// <summary>
+    /// Session log of (IMU roll, applied tilt). It exists so the gain can be fitted from
+    /// real data instead of guessed: a straight line through these points gives both the
+    /// true degrees-per-degree and the offset of the base.
+    /// </summary>
+    private void LogTiltSample(double roll, double deg)
+    {
+        try
+        {
+            var path = Path.Combine(StateDir, "tiltlog.csv");
+            if (_tiltLogLines == 0 || !File.Exists(path))
+                File.WriteAllText(path, "iso,imu_roll,tilt_deg\n");
+            File.AppendAllText(path, string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"{DateTime.UtcNow:o},{roll:0.00},{deg:0.00}\n"));
+            if (++_tiltLogLines > 20000) _tiltLogLines = 0;
+        }
+        catch
+        {
+            // logging must never break the levelling itself
+        }
+    }
+
+    // ------------------------------------------------- closed-loop trim
+
+    /// <summary>What the optical check still measured, degrees (NaN = never measured).</summary>
+    public double TrimResidual { get; private set; } = double.NaN;
+
+    /// <summary>
+    /// One correction step of the auto-level: measure what is left of the tilt on the
+    /// frame that is actually displayed, then shift the base by exactly that amount.
+    ///
+    /// Why feedback and not just the IMU: one degree of head roll is not one degree of
+    /// image roll. The panel is composited onto a curved surface, the lens correction
+    /// is not the inverse of the pre-distortion, and the IMU axes are not exactly the
+    /// panel axes. All three act as an unknown gain slightly off 1, which the naive
+    /// mapping cannot cancel and the operator sees as a leftover lean. Closing the loop
+    /// on the picture is the only way to make the residual actually zero.
+    /// </summary>
+    public async Task<(bool ok, string text)> TrimOnceAsync()
+    {
+        if (!_settings.TrimEnabled) return (false, "экспериментальная подстройка выключена");
+        if (!_settings.AutoLevel) return (false, "auto-level выключен");
+
+        var spread = RollSpread();
+        if (double.IsNaN(spread)) return (false, "мало сэмплов IMU - включите авто-горизонт на шлеме");
+        if (spread > 0.8) return (false, $"голова двигается (разброс {spread:0.0}°) - подстройка отложена");
+
+        var eye = ReadConfig()["eye"]?.GetValue<string>() ?? "left";
+        var gray = WindowProbe.GrabSquare($"Quest3-{eye}", 512);
+        if (gray == null) return (false, "окно каста не отвечает - картинки нет");
+
+        var python = ResolvePython();
+        if (python == null) return (false, "python не найден: подстройка по картинке выключена");
+        var level = Path.Combine(CastHome, "level.py");
+        if (!File.Exists(level)) return (false, $"level.py отсутствует: {level}");
+
+        var rawPath = Path.Combine(StateDir, "trim.raw");
+        try
+        {
+            File.WriteAllBytes(rawPath, gray);
+        }
+        catch (Exception ex)
+        {
+            return (false, $"кадр не записался: {ex.Message}");
+        }
+
+        var (roll, conf) = await RunLevelAsync(python, level, rawPath);
+        if (double.IsNaN(roll)) return (false, "замер остатка не удался");
+        TrimResidual = roll;
+
+        if (conf < 0.30) return (false, $"мало прямых линий (уверенность {conf:0.00}) - наведите на стену или стол");
+        if (Math.Abs(roll) < 0.3) return (true, $"уже ровно (остаток {roll:+0.0;-0.0}°)");
+        if (Math.Abs(roll) > 12) return (false, $"остаток {roll:0.0}° слишком велик - нужна КАЛИБРОВКА");
+
+        _settings.TiltBaseDeg = Math.Round((_settings.TiltBaseDeg - roll) * 4) / 4;
+        _settings.Save();
+        _lastAppliedDeg = double.NaN;                 // let the forced apply through
+        await ApplyDegAsync(_settings.TiltBaseDeg);
+        return (true, $"база сдвинута на {-roll:+0.0;-0.0}° (остаток был {roll:+0.0;-0.0}°, уверенность {conf:0.00})");
+    }
+
+    private static async Task<(double roll, double conf)> RunLevelAsync(string python, string level, string raw)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(python, $"\"{level}\" \"{raw}\" 512 512 --crop 0.10")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var p = System.Diagnostics.Process.Start(psi);
+            if (p == null) return (double.NaN, 0);
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            var errTask = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(20000))
+            {
+                try { p.Kill(true); } catch { }
+                return (double.NaN, 0);
+            }
+            var text = await outTask;
+            var err = await errTask;
+            var m = System.Text.RegularExpressions.Regex.Match(
+                text, @"roll=(-?\d+(?:\.\d+)?)\s+confidence=(\d+(?:\.\d+)?)");
+            if (!m.Success)
+            {
+                ELog($"trim: level.py вернул '{text.Trim()}' {err.Trim()}");
+                return (double.NaN, 0);
+            }
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            return (double.Parse(m.Groups[1].Value, inv), double.Parse(m.Groups[2].Value, inv));
+        }
+        catch (Exception ex)
+        {
+            ELog($"trim: level.py упал ({ex.GetType().Name}: {ex.Message})");
+            return (double.NaN, 0);
+        }
+    }
+
+    private string? ResolvePython()
+    {
+        var fromCfg = ReadConfig()["pythonPath"]?.GetValue<string>();
+        if (!string.IsNullOrWhiteSpace(fromCfg) && File.Exists(fromCfg)) return fromCfg;
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var dir in path.Split(Path.PathSeparator))
+        {
+            if (string.IsNullOrWhiteSpace(dir)) continue;
+            var exe = Path.Combine(dir.Trim(), "python.exe");
+            if (File.Exists(exe)) return exe;
+        }
+        return null;
     }
 
     private string WriteLiveShader(double deg)
@@ -534,6 +716,7 @@ public sealed class CastEngine
             Guide = _settings.Guide,
             ImuRoll = LastRoll,
             AutoLevel = _settings.AutoLevel,
+            TrimResidual = TrimResidual,
         };
     }
 

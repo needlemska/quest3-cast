@@ -212,6 +212,9 @@ public class MainActivity extends Activity {
     private volatile double imuPitch;
     private volatile boolean imuSeen;
     private volatile long lastTiltSent;
+    private double rollFilt = Double.NaN;
+    /** low-pass weight per sample: ~60 ms at the ~800 Hz the vendor sensor reports */
+    private static final double IMU_ALPHA = 0.02;
     private int tiltLogged;
     private int imuEvents;
     private final android.hardware.SensorEventListener imuListener =
@@ -234,7 +237,21 @@ public class MainActivity extends Activity {
                     // gravity inside the screen plane, i.e. atan2(x, -y). The earlier
                     // atan2(x, z) treated the view axis as "up" and produced nonsense
                     // when the headset lay on its back, where gravity sits on y.
-                    imuRoll = Math.toDegrees(Math.atan2(ax, -ay));
+                    double rawRoll = Math.toDegrees(Math.atan2(ax, -ay));
+                    // the sensor runs at ~800 Hz and every sample is noisy; a single
+                    // instant 4 times a second made the picture twitch, so the angle is
+                    // low-passed with a ~60 ms time constant and only then sent
+                    if (Double.isNaN(rollFilt)) {
+                        rollFilt = rawRoll;
+                    } else {
+                        double delta = rawRoll - rollFilt;
+                        if (delta > 180) delta -= 360;
+                        if (delta < -180) delta += 360;
+                        rollFilt += IMU_ALPHA * delta;
+                        if (rollFilt > 180) rollFilt -= 360;
+                        if (rollFilt < -180) rollFilt += 360;
+                    }
+                    imuRoll = rollFilt;
                     imuPitch = Math.toDegrees(Math.atan2(az, Math.hypot(ax, ay)));
                     imuSeen = true;
                     sendTilt();
@@ -266,7 +283,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Push roll/pitch at most 4 times a second; the PC applies it to the shader. */
+    /** Push roll/pitch up to 10 times a second; the PC applies it to the shader. */
     private void sendTilt() {
         if (tiltLogged < 4) {
             android.util.Log.i("QCTILT", "enter connected=" + connected + " out=" + (out != null)
@@ -280,7 +297,7 @@ public class MainActivity extends Activity {
             return;
         }
         long now = System.currentTimeMillis();
-        if (now - lastTiltSent < 250) return;
+        if (now - lastTiltSent < 100) return;
         lastTiltSent = now;
         // sensor callbacks land on the UI thread, and Android forbids socket writes
         // there (NetworkOnMainThreadException), so the write itself is queued

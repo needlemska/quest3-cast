@@ -15,6 +15,8 @@ public partial class MainWindow : Window
     private bool _refreshing;
     private bool _busy;
     private CastState? _last;
+    private DateTime _lastTrim = DateTime.MinValue;
+    private string _lastTrimNote = "";
 
     public MainWindow(Settings cfg)
     {
@@ -44,7 +46,11 @@ public partial class MainWindow : Window
         }
 
         _timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
-        _timer.Tick += async (_, _) => await RefreshAsync();
+        _timer.Tick += async (_, _) =>
+        {
+            await RefreshAsync();
+            await MaybeTrimAsync();
+        };
         _timer.Start();
         Loaded += async (_, _) => await RefreshAsync();
         Closed += async (_, _) => await _server.DisposeAsync();
@@ -80,11 +86,37 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Follow-up of the auto-level: every few seconds, while the head is still, the
+    /// displayed frame is measured and the base tilt is nudged by the leftover angle.
+    /// The IMU mapping alone always keeps a degree or two of lean, because the panel
+    /// curvature and the lens correction do not cancel exactly.
+    /// </summary>
+    private async Task MaybeTrimAsync()
+    {
+        if (!_cfg.AutoLevel) return;
+        if (!_cfg.TrimEnabled) return;
+        if (_busy || _refreshing) return;
+        if (_last?.PipelineRunning != true || _last.AutoLevel != true) return;
+        if ((DateTime.UtcNow - _lastTrim).TotalSeconds < 5) return;
+        _lastTrim = DateTime.UtcNow;
+        try
+        {
+            var (ok, text) = await _engine.TrimOnceAsync();
+            var interesting = ok || (text != _lastTrimNote && !text.Contains("двигается"));
+            _lastTrimNote = text;
+            if (interesting) AppLog("trim: " + text);
+        }
+        catch (Exception ex)
+        {
+            AppLog("trim: " + ex.Message);
+        }
+    }
+
     private void Render(CastState st)
     {
         _last = st;
-        TxtDevice.Text = st.Device;
-        TxtCast.Text = st.Running
+        TxtDevice.Text = st.Device;        TxtCast.Text = st.Running
             ? (st.Fps > 0 ? $"{st.Fps} fps · {st.Mbps} Mb/s" : "запущен")
             : (st.DaemonRunning ? "пауза" : "остановлен");
 
@@ -118,9 +150,12 @@ public partial class MainWindow : Window
 
         TxtSub.Text = $"daemon {(st.DaemonRunning ? st.DaemonUp : "—")} · конвейер {(st.PipelineRunning ? st.PipelineUp : "—")} · {st.Player} · перезапусков {st.Restarts} · наклон {st.Tilt:0.0}°"
             + (st.AutoLevel ? $" · IMU {(double.IsNaN(st.ImuRoll) ? "—" : st.ImuRoll.ToString("0.0"))}°" : "")
+            + (double.IsNaN(st.TrimResidual) ? "" : $" · остаток {st.TrimResidual:+0.0;-0.0}°")
             + (st.Guide ? $" · линия вкл" : "");
         BtnAuto.Content = _cfg.AutoLevel ? "АВТО ВКЛ" : "АВТО-ГОРИЗОНТ";
         BtnSign.Content = _cfg.TiltSign >= 0 ? "ЗНАК КРЕНА: ОБЫЧНЫЙ" : "ЗНАК КРЕНА: ПЕРЕВЁРНУТ";
+        BtnGainUp.Content = $"ГЕЙН + ({_cfg.TiltGain:0.00})";
+        BtnGainDown.Content = $"ГЕЙН − ({_cfg.TiltGain:0.00})";
         BtnGuide.Content = st.Guide ? "ЛИНИЯ ВКЛ" : "ЛИНИЯ";
 
         if (!_busy)
@@ -221,6 +256,17 @@ public partial class MainWindow : Window
     private void Minus_Click(object sender, RoutedEventArgs e) => Nudge(-0.5);
 
     private void Plus_Click(object sender, RoutedEventArgs e) => Nudge(0.5);
+
+    private void GainDown_Click(object sender, RoutedEventArgs e) => Gain(-0.05);
+
+    private void GainUp_Click(object sender, RoutedEventArgs e) => Gain(0.05);
+
+    private void Gain(double delta)
+    {
+        var (ok, text) = _engine.SetGain(_engine.TiltGain + delta);
+        AppLog((ok ? "ok   " : "fail ") + "гейн " + text);
+        if (ok && _last != null) Render(_last);
+    }
 
     private void Nudge(double delta)
     {

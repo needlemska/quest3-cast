@@ -253,6 +253,17 @@ public sealed class ControlServer : IAsyncDisposable
                 result = _engine.SetTiltSign(AsBool(value, true));
                 break;
             }
+            case "gain":
+            {
+                var g = value is null ? double.NaN : value.GetValue<double>();
+                result = _engine.SetGain(g);
+                break;
+            }
+            case "trim":
+            {
+                result = await _engine.TrimOnceAsync();
+                break;
+            }
             case "guide":
             {
                 result = _engine.SetGuide(AsBool(value, true));
@@ -336,7 +347,8 @@ public sealed class ControlServer : IAsyncDisposable
         ["pipelineUp"] = s.PipelineUp,
         ["guide"] = s.Guide,
         ["imu"] = double.IsNaN(s.ImuRoll) ? null : Math.Round(s.ImuRoll, 1),
-        ["autoLevel"] = s.AutoLevel
+        ["autoLevel"] = s.AutoLevel,
+        ["trim"] = double.IsNaN(s.TrimResidual) ? null : Math.Round(s.TrimResidual, 1)
     };
 
     private static JsonObject Err(string message) => new() { ["type"] = "error", ["message"] = message };

@@ -26,6 +26,18 @@ public sealed class Settings
     /// <summary>+1 / -1: the IMU axis may point the other way, so the user can flip it.</summary>
     public int TiltSign { get; set; } = 1;
 
+    /// <summary>
+    /// How many degrees of picture rotation one degree of measured head roll actually
+    /// produces. It is not 1.0: the panel is composited on a curved surface, the lens
+    /// correction is not an exact inverse of the pre-distortion, and the IMU axes are
+    /// not the panel axes. Everything together behaves as an unknown gain, which is
+    /// exactly the "крен остаётся" symptom; the value is fitted from tiltlog.csv.
+    /// </summary>
+    public double TiltGain { get; set; } = 1.0;
+
+    /// <summary>Experimental optical trim (needs python + a still picture).</summary>
+    public bool TrimEnabled { get; set; }
+
     /// <summary>Alignment line over the streamed picture (the headset draws its twin).</summary>
     public bool Guide { get; set; }
 
