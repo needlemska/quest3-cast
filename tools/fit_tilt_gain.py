@@ -30,9 +30,21 @@ except Exception:
 
 
 def default_path():
+    # the engine's state folder, in the order the app resolves it: the explicit
+    # override first, then the app's own state dir, then the service one
+    env = os.environ.get("QUEST3CAST_STATE")
+    if env:
+        candidate = os.path.join(env, "tiltlog.csv")
+        if os.path.exists(candidate):
+            return candidate
+    roaming = os.environ.get("APPDATA")
+    if roaming:
+        candidate = os.path.join(roaming, "QuestCast", "state", "tiltlog.csv")
+        if os.path.exists(candidate):
+            return candidate
     local = os.environ.get("LOCALAPPDATA")
     if local:
-        candidate = os.path.join(local, "quest3-control", "state", "tiltlog.csv")
+        candidate = os.path.join(local, "quest3-cast", "tiltlog.csv")
         if os.path.exists(candidate):
             return candidate
     here = os.path.dirname(os.path.abspath(__file__))
@@ -75,12 +87,26 @@ def fit(rows):
 
 
 def main(argv):
-    args = [a for a in argv[1:] if not a.startswith("--")]
+    # `--current 1.2` used to leak its value into the positional path, so the tool
+    # looked for a file named "1.2" and always answered "нет файла"
+    path = None
     current = 1.0
-    for i, a in enumerate(argv[1:]):
-        if a == "--current" and i + 2 < len(argv):
-            current = float(argv[i + 2])
-    path = args[0] if args else default_path()
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--current" and i + 1 < len(argv):
+            try:
+                current = float(argv[i + 1])
+            except ValueError:
+                print(f"--current: не число: {argv[i + 1]}")
+                return 2
+            i += 2
+            continue
+        if not a.startswith("--") and path is None:
+            path = a
+        i += 1
+    if path is None:
+        path = default_path()
     if not os.path.exists(path):
         print(f"нет файла {path}")
         print("включите АВТО-ГОРИЗОНТ, покрутите головой на 20-30 градусов и повторите")

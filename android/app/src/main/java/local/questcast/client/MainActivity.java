@@ -217,6 +217,9 @@ public class MainActivity extends Activity {
     private static final double IMU_ALPHA = 0.02;
     private int tiltLogged;
     private int imuEvents;
+    /** A slow socket must not turn into an unbounded queue of queued writes. */
+    private final java.util.concurrent.atomic.AtomicBoolean tiltInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private final android.hardware.SensorEventListener imuListener =
             new android.hardware.SensorEventListener() {
                 @Override
@@ -298,10 +301,19 @@ public class MainActivity extends Activity {
         }
         long now = System.currentTimeMillis();
         if (now - lastTiltSent < 100) return;
+        // drop this sample when the previous write has not finished: every queued
+        // write is stale by the time it runs, and a stalled PC socket would otherwise
+        // pile up tasks until the app is killed
+        if (!tiltInFlight.compareAndSet(false, true)) return;
         lastTiltSent = now;
         // sensor callbacks land on the UI thread, and Android forbids socket writes
         // there (NetworkOnMainThreadException), so the write itself is queued
-        tx.execute(this::sendTiltNow);
+        try {
+            tx.execute(this::sendTiltNow);
+        } catch (Exception e) {
+            tiltInFlight.set(false);
+            android.util.Log.i("QCTILT", "tilt queue rejected: " + e);
+        }
     }
 
     private void sendTiltNow() {
@@ -320,6 +332,8 @@ public class MainActivity extends Activity {
             }
         } catch (Exception e) {
             android.util.Log.i("QCTILT", "tilt send failed: " + e);
+        } finally {
+            tiltInFlight.set(false);
         }
     }
 
