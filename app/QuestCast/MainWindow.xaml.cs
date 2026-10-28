@@ -14,6 +14,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _timer;
     private bool _refreshing;
     private bool _busy;
+    private CastState? _last;
 
     public MainWindow(Settings cfg)
     {
@@ -81,6 +82,7 @@ public partial class MainWindow : Window
 
     private void Render(CastState st)
     {
+        _last = st;
         TxtDevice.Text = st.Device;
         TxtCast.Text = st.Running
             ? (st.Fps > 0 ? $"{st.Fps} fps · {st.Mbps} Mb/s" : "запущен")
@@ -131,7 +133,7 @@ public partial class MainWindow : Window
     {
         _busy = true;
         TxtBusy.Text = what;
-        foreach (var b in new[] { BtnStart, BtnStop, BtnRestart, BtnMic, BtnLens, BtnCalib, BtnAuto, BtnSign })
+        foreach (var b in new[] { BtnStart, BtnStop, BtnRestart, BtnMic, BtnLens, BtnCalib, BtnAuto, BtnSign, BtnGuide, BtnMinus, BtnPlus })
             b.IsEnabled = false;
         foreach (var r in new[] { RbLeft, RbRight, RbBoth }) r.IsEnabled = false;
     }
@@ -140,7 +142,7 @@ public partial class MainWindow : Window
     {
         _busy = false;
         TxtBusy.Text = "";
-        foreach (var b in new[] { BtnStart, BtnStop, BtnRestart, BtnMic, BtnLens, BtnCalib, BtnAuto, BtnSign })
+        foreach (var b in new[] { BtnStart, BtnStop, BtnRestart, BtnMic, BtnLens, BtnCalib, BtnAuto, BtnSign, BtnGuide, BtnMinus, BtnPlus })
             b.IsEnabled = true;
         foreach (var r in new[] { RbLeft, RbRight, RbBoth }) r.IsEnabled = true;
     }
@@ -206,7 +208,10 @@ public partial class MainWindow : Window
     /// <summary>Alignment line: the headset draws the reference, the stream draws its twin.</summary>
     private void Guide_Click(object sender, RoutedEventArgs e)
     {
-        var on = !_cfg.Guide;
+        // the line can also be switched from the headset, so the truth is the last
+        // state we saw, not the copy of the config this window loaded at startup
+        var current = _last?.Guide ?? _cfg.Guide;
+        var on = !current;
         var (ok, text) = _engine.SetGuide(on);
         _cfg.Guide = on;
         AppLog((ok ? "ok   " : "fail ") + text);

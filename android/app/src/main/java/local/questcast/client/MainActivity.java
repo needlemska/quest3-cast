@@ -394,6 +394,9 @@ public class MainActivity extends Activity {
         String eye = st.optString("eye", "left");
         streamDeg = st.has("tilt") ? st.optDouble("tilt") : Double.NaN;
         imuDeg = st.has("imu") && !st.isNull("imu") ? st.optDouble("imu") : Double.NaN;
+        // the PC owns the guide flag: toggling the line from the Windows window must also
+        // hide the line in the headset, otherwise the two sides silently disagree
+        boolean srvGuide = st.optBoolean("guide", guideOn);
 
         ui.post(() -> {
             renderMic(micOn);
@@ -414,6 +417,9 @@ public class MainActivity extends Activity {
                             + "\nнаклон: " + st.optDouble("tilt") + "° · плеер: " + st.optString("player")
                             + "\nпрошло: " + st.optString("daemonUp") + " / перезапусков " + st.optInt("restarts"));
 
+            if (srvGuide != guideOn) {
+                applyGuide(srvGuide);
+            }
             if (guideOn) {
                 horizonView.setAngles(streamDeg, imuDeg);
             }
@@ -425,6 +431,12 @@ public class MainActivity extends Activity {
      * fixed to the panel, and the PC is asked to draw its own line over the stream.
      */
     private void showGuide(boolean on) {
+        applyGuide(on);
+        send("guide", on);
+    }
+
+    /** Show/hide the headset line without telling the PC, which is the side that owns the state. */
+    private void applyGuide(boolean on) {
         guideOn = on;
         scrollUi.setVisibility(on ? View.GONE : View.VISIBLE);
         calibOverlay.setVisibility(on ? View.VISIBLE : View.GONE);
@@ -432,7 +444,6 @@ public class MainActivity extends Activity {
         if (on) {
             horizonView.setAngles(streamDeg, imuDeg);
         }
-        send("guide", on);
     }
 
     private void renderMic(boolean on) {

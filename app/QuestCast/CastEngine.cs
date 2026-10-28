@@ -182,7 +182,8 @@ public sealed class CastEngine
             ELog($"guide: write failed ({ex.GetType().Name}: {ex.Message})");
         }
 
-        _ = Task.Run(() => ApplyDegAsync(CurrentDeg()));
+        // no shader work here on purpose: the guide lives in the overlay window, and
+        // rewriting tilt.json would fight the IMU driver with an out-of-date angle
         return (true, on ? "линия на стриме включена" : "линия на стриме выключена");
     }
 
@@ -197,9 +198,12 @@ public sealed class CastEngine
         if (_settings.AutoLevel)
         {
             // keep tracking relative to the new picture tilt, otherwise the next IMU
-            // sample would pull the frame back to the old base
+            // sample would pull the frame back to the old base. If the client is not
+            // sending tilt right now there is no roll to rebase on - keep the old one,
+            // a NaN base would poison every later sample
+            var roll = LastRoll;
             _settings.TiltBaseDeg = deg;
-            _settings.TiltBaseRoll = LastRoll;
+            if (double.IsFinite(roll)) _settings.TiltBaseRoll = roll;
             _settings.Save();
         }
         _lastAppliedDeg = double.NaN;
@@ -349,6 +353,10 @@ public sealed class CastEngine
 
     private string WriteLiveShader(double deg)
     {
+        // a NaN/inf angle would reach GLSL as `nan` and the shader would stop compiling,
+        // leaving the player with a black frame - never hand it over
+        if (!double.IsFinite(deg)) deg = 0;
+
         var cfg = ReadConfig();
         var k1 = cfg["lensK1"]?.GetValue<double>() ?? -0.4;
         var k2 = cfg["lensK2"]?.GetValue<double>() ?? 0;

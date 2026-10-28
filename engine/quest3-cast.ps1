@@ -378,15 +378,12 @@ function Write-LensShader($cfg) {
     $text = $text.Replace('@K1@', ([double]$cfg.lensK1).ToString($inv))
     $text = $text.Replace('@K2@', ([double]$cfg.lensK2).ToString($inv))
     $text = $text.Replace('@ANGLE@', $ang.ToString($inv))
-    # alignment guide line: drawn in output space so it stays horizontal; the
-    # client draws the twin line in the headset, aligning the two sets the tilt
-    $guide = if ($cfg.PSObject.Properties['guide'] -and $cfg.guide) { 1 } else { 0 }
-    $guideAng = 0.0
-    if ($cfg.PSObject.Properties['guideAngle'] -and $cfg.guideAngle) {
-        $guideAng = [math]::Round([double]$cfg.guideAngle * [math]::PI / 180.0, 6)
-    }
-    $text = $text.Replace('@GUIDE@', [string]$guide)
-    $text = $text.Replace('@GUIDEANG@', $guideAng.ToString($inv))
+    # The alignment line lives in the HUD overlay (a screen-space window), not in the
+    # shader: a shader line would be baked into the streamed frame and the operator
+    # would compare a line against itself. Keep the shader path permanently off so a
+    # stale config can never paint a second line.
+    $text = $text.Replace('@GUIDE@', '0')
+    $text = $text.Replace('@GUIDEANG@', '0.0')
     $out = Join-Path $stateDir 'lens.glsl'
     Set-Content -Path $out -Value $text -Encoding ASCII
     return $out
@@ -659,6 +656,17 @@ function Start-DaemonLoop {
 
     Set-Content -Path $pidFile -Value $PID -Encoding ASCII
     Remove-Item $stopFlag -ErrorAction SilentlyContinue
+
+    # The alignment line is a session tool, not a setting: if it was left on when the
+    # machine went down, a fresh start would paint a line over the desktop with no
+    # visible reason. The app turns it on again when it is actually needed.
+    $guidePath = Join-Path $stateDir 'guide.json'
+    try {
+        Set-Content -Path $guidePath -Value '{"on":false}' -Encoding ASCII
+    } catch {
+        Write-Log "guide reset failed: $($_.Exception.Message)"
+    }
+
     Write-Log "daemon up  pid=$PID  serial=$serial  eye=$($cfg.eye)"
     Write-Log "mode: $(if ($useLens) { "lens k1=$($cfg.lensK1) k2=$($cfg.lensK2) tilt=$($cfg.rotateDeg) player=$playerName" } else { 'raw' })"
 
