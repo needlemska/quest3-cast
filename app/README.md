@@ -159,7 +159,7 @@ adb -s <IP_шлема>:5555 reverse tcp:47801 tcp:47801
 set ANDROID_HOME=C:\Android\Sdk
 set JAVA_HOME=C:\Program Files\Microsoft\jdk-21.0.12.8-hotspot
 cd QuestCastClient
-C:\Users\lenov\.gradle\wrapper\dists\gradle-8.7-bin\<hash>\gradle-8.7\bin\gradle.bat assembleDebug
+%USERPROFILE%\.gradle\wrapper\dists\gradle-8.7-bin\<hash>\gradle-8.7\bin\gradle.bat assembleDebug
 ```
 
 `--offline` не проходит: `aapt2` не лежит в кэше Gradle. Ставить без сети не получится.

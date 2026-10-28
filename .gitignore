@@ -21,6 +21,15 @@ config.json
 *.log
 capture/
 *.pid
+*.csv
+
+# никаких снимков живого каста и рабочего стола: в репозитории живут только
+# схемы и синтетические тесты (docs/screenshots/lens.png, guide.png)
+preview-*.png
+cast-*.png
+screenshot-*.png
+docs/screenshots/app.png
+docs/screenshots/hud.png
 
 # python
 __pycache__/
