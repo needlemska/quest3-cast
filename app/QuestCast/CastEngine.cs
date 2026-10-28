@@ -87,11 +87,21 @@ public sealed class CastEngine
         return JsonNode.Parse(json) as JsonObject ?? new JsonObject();
     }
 
+    private readonly object _cfgLock = new();
+
     private void PatchConfig(Action<JsonObject> patch)
     {
-        var cfg = ReadConfig();
-        patch(cfg);
-        File.WriteAllText(ConfigPath, cfg.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        // two threads patch the config at once (a LAN command and a UI click), and a
+        // plain WriteAllText there can leave a truncated file behind. Serialise the
+        // read-modify-write and swap the file atomically instead.
+        lock (_cfgLock)
+        {
+            var cfg = ReadConfig();
+            patch(cfg);
+            var tmp = ConfigPath + ".tmp";
+            File.WriteAllText(tmp, cfg.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(tmp, ConfigPath, true);
+        }
     }
 
     public string Eye => ReadConfig()["eye"]?.GetValue<string>() ?? "left";
@@ -103,6 +113,14 @@ public sealed class CastEngine
     public async Task<(bool ok, string text)> StartAsync()
     {
         var (code, output) = await RunAsync(new[] { "start" }, 60_000);
+        // the daemon wipes guide.json on every start so a line left over from the
+        // previous session cannot hang over the picture. That also wipes a line the
+        // operator *asked* for, so put the remembered intent back explicitly.
+        if (code == 0 && _settings.Guide)
+        {
+            try { SetGuide(true); }
+            catch (Exception ex) { ELog($"start: guide restore failed ({ex.GetType().Name}: {ex.Message})"); }
+        }
         return (code == 0, output.Trim());
     }
 
@@ -170,10 +188,13 @@ public sealed class CastEngine
         {
             var req = Path.Combine(StateDir, "guide.json");
             var tmp = req + ".tmp";
+            // the guide angle must be the one the player is really showing: with
+            // auto-level on, config.rotateDeg is only the base, not what is on screen
+            var live = (DateTime.UtcNow - _lastApply).TotalSeconds < 5 && double.IsFinite(_lastAppliedDeg);
             File.WriteAllText(tmp, System.Text.Json.JsonSerializer.Serialize(new
             {
                 on,
-                deg = CurrentDeg(),
+                deg = live ? _lastAppliedDeg : CurrentDeg(),
                 ts = DateTime.UtcNow.ToString("o")
             }));
             File.Move(tmp, req, true);
@@ -527,7 +548,11 @@ public sealed class CastEngine
         foreach (var dir in path.Split(Path.PathSeparator))
         {
             if (string.IsNullOrWhiteSpace(dir)) continue;
-            var exe = Path.Combine(dir.Trim(), "python.exe");
+            var clean = dir.Trim();
+            // the Microsoft Store alias lives in ...\WindowsApps and does nothing but
+            // open the store page when spawned - skip it or trim silently "fails"
+            if (clean.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase)) continue;
+            var exe = Path.Combine(clean, "python.exe");
             if (File.Exists(exe)) return exe;
         }
         return null;
@@ -559,16 +584,6 @@ public sealed class CastEngine
         var outPath = Path.Combine(StateDir, "lens-live.glsl");
         File.WriteAllText(outPath, src);
         return outPath;
-    }
-
-    private async Task SendMpvCommandAsync(params string[] command)
-    {
-        using var pipe = new System.IO.Pipes.NamedPipeClientStream(".", "quest3cast-ipc", System.IO.Pipes.PipeDirection.InOut);
-        await pipe.ConnectAsync(1500);
-        var payload = System.Text.Json.JsonSerializer.Serialize(new { command });
-        var bytes = System.Text.Encoding.UTF8.GetBytes(payload + "\n");
-        await pipe.WriteAsync(bytes);
-        await pipe.FlushAsync();
     }
 
     private static void ELog(string s)

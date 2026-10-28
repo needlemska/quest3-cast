@@ -130,6 +130,14 @@ public sealed class ControlServer : IAsyncDisposable
 
     private async Task HandleMessageAsync(ConnectedClient client, int id, string line)
     {
+        // a single ridiculous line should not be able to eat the process memory:
+        // ReadLineAsync has no size limit of its own
+        if (line.Length > 8192)
+        {
+            Send(client, Err("message too long"));
+            return;
+        }
+
         JsonObject? msg;
         try { msg = JsonNode.Parse(line) as JsonObject; }
         catch { Send(client, Err("bad json")); return; }
@@ -141,6 +149,12 @@ public sealed class ControlServer : IAsyncDisposable
         {
             var token = msg["token"]?.GetValue<string>() ?? "";
             client.Authed = string.Equals(token, _token, StringComparison.OrdinalIgnoreCase);
+            if (!client.Authed)
+            {
+                // a wrong token is cheap to try, so make guessing cost time: this is a
+                // LAN socket and 8 characters are only enough when nobody can hammer it
+                await Task.Delay(400);
+            }
             Send(client, new JsonObject { ["type"] = "auth", ["ok"] = client.Authed });
             if (client.Authed) await PushStateAsync(client);
             else _log($"client #{id}: wrong token");
