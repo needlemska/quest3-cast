@@ -23,6 +23,13 @@ public partial class MainWindow : Window
         _cfg = cfg;
         InitializeComponent();
 
+        if (!string.IsNullOrEmpty(Settings.LastSaveError))
+        {
+            // the settings fell back to another folder because the profile is denied:
+            // say it out loud instead of letting the user wonder where they went
+            AppLog("настройки не сохранились в профиль: " + Settings.LastSaveError);
+        }
+
         _engine = new CastEngine(cfg);
         _server = new ControlServer(cfg.Port, cfg.Token, _engine, AppLog);
 
